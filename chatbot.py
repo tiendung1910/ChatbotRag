@@ -3,15 +3,13 @@ from chromadb.utils import embedding_functions
 from openai import OpenAI
 import os
 from pypdf import PdfReader
-from langchain_text_splitters import SentenceTransformersTokenTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 LM_STUDIO_URL = "http://localhost:1234/v1"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 CHAT_MODEL = "qwen2.5-1.5b-instruct"
 DATA_FOLDER = "./documents"
 VECTORDB_DIR = "./vector-db"
-
-client = OpenAI(base_url=LM_STUDIO_URL,api_key="lm-studio")
 
 
 def load_documents(folder_path):
@@ -36,51 +34,78 @@ def load_documents(folder_path):
 
 # chunking vs nap chromadb
 def setup_vector_db():
-    client = chromadb.PersistentClient('./vector-db')
-    embedding_model = embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name=EMBEDDING_MODEL)
-    
-    collection = client.get_or_create_collection(
-        name="vector-table",
-        embedding_function=embedding_model
+    client = chromadb.PersistentClient(VECTORDB_DIR)
+    embedding_ft = embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name = "all-MiniLM-L6-v2"
     )
+    collection = client.get_or_create_collection("chunks-table")
     
-    if collection.count() > 0:
-        print(f"dang co {collection.count()} chunk data")
+    if(collection.count() > 0):
+        print(f"Đã nạp tài liệu rồi. Đang có {collection.count()} chunk")
+        return collection
+        
+    
+    raw_docs = load_documents(DATA_FOLDER)
+    
+    if not raw_docs:
+        print("khong tim thay tai lieu")
         return collection
     
-    raw_document = load_documents(DATA_FOLDER)
-    if not raw_document:
-        print("chua co tai lieu")
-        return collection
-    
-    text_splitter = SentenceTransformersTokenTextSplitter(
-        tokens_per_chunk=100,
-        chunk_overlap=20
+    # cấu hình chunking
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=50,
+        separators=["\n\n", "\n", " ", ""]
     )
     
     chunks = []
     metadatas = []
     ids = []
     chunk_counter = 0
-    for doc in raw_document:
-        sub_chunks = text_splitter.split_text(doc)
+    BATCH_SIZE = 1000
+    
+    for doc in raw_docs:
+        sub_chunks = text_splitter.split_text(doc["content"])
         for chunk in sub_chunks:
             chunks.append(chunk)
-            metadatas.append({"source": doc["source"]})
+            metadatas.append({"source": doc["content"]})
+            ids.append(f"chunk_{chunk_counter}")
             chunk_counter += 1
-            
-    print(f"ddang nhung {len(chunk)} vao vector db")
-    collection.add(
-        documents=chunks,
-        metadatas=metadatas,
-        ids=ids
+
+    for i in range(0, len(chunks), BATCH_SIZE):
+        batch_chunk = chunks[i : i+BATCH_SIZE]
+        batch_metadata = metadatas[i : i+BATCH_SIZE]
+        batch_ids = ids[i : i+BATCH_SIZE]
+        collection.add(ids=batch_ids,documents=batch_chunk,metadatas=batch_metadata)
+    print(f"lưu data chưa đính kèm metadata, thành công")
+    
+    return collection
+
+def queryAI(collection, query: str):
+    results = collection.query(
+        query_texts=[query],
+        n_results=3
     )
     
-    
+    retrieve_docs = results["documents"][0] if results["documents"] else []
+    retrieve_metadata = results["metadatas"][0] if results["metadatas"] else []
+
     
 
 if __name__ == "__main__":
-    load_documents(DATA_FOLDER)
-    setup_vector_db()
-    # pass
+    print("Đang khởi động bot chat")
+    collection = setup_vector_db()
+    
+    print("🤖Bot đã sẵn sàng !!!")
+    while True:
+        question = input("\nBạn hỏi: ").strip()
+        if question.lower() == "quit" or question.lower() == exit:
+            print("\nTạm biệt bạn")
+            break
+        
+        if not question:
+            continue
+        
+        print("\nĐang xử lý câu hỏi:")
+        queryAI(collection,question)
+        
